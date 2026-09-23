@@ -41,14 +41,16 @@ if run_btn or "df" not in st.session_state:
         seed=int(seed),
     )
     rack = build_rack({"Low": low_cap, "Mid": mid_cap, "High": high_cap})
-    log, pallets, rack = run_simulation(pallets, rack)
+    log, pallets, rack, occupancy_history = run_simulation(pallets, rack)
     df = pallets_to_dataframe(pallets)
     st.session_state["df"] = df
     st.session_state["rack"] = rack
     st.session_state["log"] = log
+    st.session_state["occ_history"] = pd.DataFrame(occupancy_history)
 
 df = st.session_state["df"]
 rack = st.session_state["rack"]
+occ_history = st.session_state["occ_history"]
 
 # ---------------------------------------------------------------------------
 # KPI summary
@@ -72,20 +74,31 @@ with left:
     st.subheader("Utilization by weight tier")
     st.dataframe(rack_utilization_by_tier(df), use_container_width=True)
 
-    st.subheader("Current rack occupancy")
-    rack_df = pd.DataFrame([{"slot_id": s.slot_id, "level": s.level, "occupied": s.occupied,
-                              "pallet_id": s.pallet_id} for s in rack])
-    occ_summary = rack_df.groupby("level")["occupied"].agg(["sum", "count"])
-    occ_summary.columns = ["occupied", "capacity"]
-    occ_summary["occupancy_%"] = (100 * occ_summary["occupied"] / occ_summary["capacity"]).round(1)
-    st.dataframe(occ_summary, use_container_width=True)
+    st.subheader("Peak rack occupancy (during the run)")
+    st.caption("The simulation runs until every pallet is retrieved, so the *final* "
+               "state is always empty — this shows the busiest point instead.")
+    level_cols = [c for c in occ_history.columns if c.endswith("_occupied")]
+    if level_cols:
+        peak_row = occ_history[level_cols].max()
+        cap_row = occ_history[[c.replace("_occupied", "_capacity") for c in level_cols]].iloc[0]
+        peak_df = pd.DataFrame({
+            "level": [c.replace("_occupied", "") for c in level_cols],
+            "peak_occupied": peak_row.values,
+            "capacity": cap_row.values,
+        })
+        peak_df["peak_occupancy_%"] = (100 * peak_df["peak_occupied"] / peak_df["capacity"]).round(1)
+        st.dataframe(peak_df.set_index("level"), use_container_width=True)
 
 with right:
-    st.subheader("Staging wait distribution")
-    if df["staging_wait_min"].notna().any():
-        st.bar_chart(df["staging_wait_min"].dropna().reset_index(drop=True))
+    st.subheader("Rack occupancy over time")
+    if level_cols and len(occ_history) > 1:
+        st.line_chart(occ_history.set_index("time")[level_cols])
     else:
-        st.info("No staging wait data.")
+        st.info("Not enough data points to chart.")
+
+    st.subheader("Staging queue length over time")
+    if len(occ_history) > 1:
+        st.line_chart(occ_history.set_index("time")["staging_count"])
 
 st.divider()
 

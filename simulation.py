@@ -28,6 +28,7 @@ def run_simulation(pallets: list, rack_slots: list, tick_minutes: int = 1,
     staging = []
     retrieval_queue = RetrievalQueue()
     log = []
+    occupancy_history = []  # snapshot of rack state at each tick, for the dashboard
 
     arrivals_sorted = sorted(pallets, key=lambda p: p.arrival_time)
 
@@ -73,6 +74,22 @@ def run_simulation(pallets: list, rack_slots: list, tick_minutes: int = 1,
                             "pallet_id": p.pallet_id,
                             "status": "LATE" if p.missed_deadline else "ON_TIME"})
 
+            # 4. Snapshot rack occupancy at this tick (this is what the
+            # dashboard needs -- occupancy *during* the run, not just at
+            # the end, since by the end everything has been retrieved)
+            by_level = {}
+            for s in rack_slots:
+                by_level.setdefault(s.level, {"occupied": 0, "capacity": 0})
+                by_level[s.level]["capacity"] += 1
+                if s.occupied:
+                    by_level[s.level]["occupied"] += 1
+            occupancy_history.append({
+                "time": current_dt,
+                "staging_count": len(staging),
+                **{f"{lvl}_occupied": v["occupied"] for lvl, v in by_level.items()},
+                **{f"{lvl}_capacity": v["capacity"] for lvl, v in by_level.items()},
+            })
+
             # stop condition
             if idx >= len(arrivals_sorted) and not staging and len(retrieval_queue) == 0:
                 break
@@ -84,4 +101,4 @@ def run_simulation(pallets: list, rack_slots: list, tick_minutes: int = 1,
     env.process(tick_process(env))
     env.run()
 
-    return log, pallets, rack_slots
+    return log, pallets, rack_slots, occupancy_history
