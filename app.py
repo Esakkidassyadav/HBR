@@ -1,5 +1,5 @@
 """
-HBR Pallet Sorting — interactive dashboard.
+HBR Pallet Sorting -- interactive dashboard.
 
 Run with: streamlit run app.py
 """
@@ -9,7 +9,11 @@ import pandas as pd
 from data_generator import generate_pallets
 from models import build_rack
 from simulation import run_simulation
-from analysis import pallets_to_dataframe, summary_kpis, rack_utilization_by_tier
+from analysis import (
+    pallets_to_dataframe, top_kpis, pallets_by_weight_category,
+    tier_wise_distribution, rack_utilization_by_tier_pct,
+    throughput_over_time, avg_handling_time_by_category,
+)
 
 st.set_page_config(page_title="HBR Pallet Sorting", layout="wide")
 st.title("Warehouse HBR Pallet Sorting")
@@ -19,15 +23,16 @@ st.caption("Weight-based slotting + deadline-driven retrieval scheduling (single
 # Sidebar controls
 # ---------------------------------------------------------------------------
 st.sidebar.header("Simulation settings")
-n_pallets = st.sidebar.slider("Number of pallets", 20, 500, 200, step=10)
-st.sidebar.subheader("Rack capacity (slots per level)")
-low_cap = st.sidebar.slider("Low level", 1, 100, 30)
-mid_cap = st.sidebar.slider("Mid level", 1, 100, 30)
-high_cap = st.sidebar.slider("High level", 1, 100, 30)
+n_pallets = st.sidebar.slider("Number of pallets", 20, 1500, 300, step=10)
+st.sidebar.subheader("Rack capacity (slots per tier)")
+t1_cap = st.sidebar.slider("Tier 1 (heavy)", 1, 150, 25)
+t2_cap = st.sidebar.slider("Tier 2 (medium)", 1, 150, 25)
+t3_cap = st.sidebar.slider("Tier 3 (light)", 1, 150, 25)
 st.sidebar.subheader("Arrival & deadline pattern")
 arr_min, arr_max = st.sidebar.slider("Arrival interval (min)", 1, 20, (2, 8))
 lead_min, lead_max = st.sidebar.slider("Line lead time / deadline window (min)", 5, 300, (30, 180))
 hwc_pct = st.sidebar.slider("Handle-with-care %", 0, 50, 15)
+misplacement_pct = st.sidebar.slider("Sorting error rate %", 0.0, 15.0, 3.2, step=0.1)
 seed = st.sidebar.number_input("Random seed", value=42, step=1)
 
 run_btn = st.sidebar.button("Run simulation", type="primary")
@@ -40,89 +45,102 @@ if run_btn or "df" not in st.session_state:
         hwc_probability=hwc_pct / 100,
         seed=int(seed),
     )
-    rack = build_rack({"Low": low_cap, "Mid": mid_cap, "High": high_cap})
-    log, pallets, rack, occupancy_history = run_simulation(pallets, rack)
+    rack = build_rack({"Tier 1": t1_cap, "Tier 2": t2_cap, "Tier 3": t3_cap})
+    log, pallets, rack, occupancy_history = run_simulation(
+        pallets, rack, misplacement_probability=misplacement_pct / 100, seed=int(seed),
+    )
     df = pallets_to_dataframe(pallets)
     st.session_state["df"] = df
-    st.session_state["rack"] = rack
-    st.session_state["log"] = log
     st.session_state["occ_history"] = pd.DataFrame(occupancy_history)
 
 df = st.session_state["df"]
-rack = st.session_state["rack"]
 occ_history = st.session_state["occ_history"]
+kpis = top_kpis(df, occ_history)
 
 # ---------------------------------------------------------------------------
-# KPI summary
+# 5 KPI number cards
 # ---------------------------------------------------------------------------
-kpis = summary_kpis(df)
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Total pallets", kpis["total_pallets"])
-c2.metric("On-time retrieval rate", f"{kpis['on_time_rate_pct']}%" if kpis["on_time_rate_pct"] is not None else "—")
-c3.metric("Missed deadlines", kpis["missed_deadlines"])
-c4.metric("Avg staging wait (min)", kpis["avg_staging_wait_min"])
-c5.metric("Max staging wait (min)", kpis["max_staging_wait_min"])
+c1.metric("Total Pallets Processed", f"{kpis['total_pallets_processed']:,}")
+c2.metric("Sorting Accuracy", f"{kpis['sorting_accuracy_pct']}%" if kpis["sorting_accuracy_pct"] is not None else "—")
+c3.metric("HBR Utilization", f"{kpis['hbr_utilization_pct']}%" if kpis["hbr_utilization_pct"] is not None else "—")
+c4.metric("Average Handling Time", f"{kpis['avg_handling_time_sec']} sec" if kpis["avg_handling_time_sec"] is not None else "—")
+c5.metric("Misplacement Rate", f"{kpis['misplacement_rate_pct']}%" if kpis["misplacement_rate_pct"] is not None else "—")
 
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Rack utilization by tier
+# 5 charts
 # ---------------------------------------------------------------------------
-left, right = st.columns([1, 1])
+row1_left, row1_right = st.columns(2)
 
-with left:
-    st.subheader("Utilization by weight tier")
-    st.dataframe(rack_utilization_by_tier(df), use_container_width=True)
+with row1_left:
+    st.subheader("1. Pallets by Weight Category")
+    weight_counts = pallets_by_weight_category(df)
+    st.bar_chart(weight_counts)
 
-    st.subheader("Peak rack occupancy (during the run)")
-    st.caption("The simulation runs until every pallet is retrieved, so the *final* "
-               "state is always empty — this shows the busiest point instead.")
-    level_cols = [c for c in occ_history.columns if c.endswith("_occupied")]
-    if level_cols:
-        peak_row = occ_history[level_cols].max()
-        cap_row = occ_history[[c.replace("_occupied", "_capacity") for c in level_cols]].iloc[0]
-        peak_df = pd.DataFrame({
-            "level": [c.replace("_occupied", "") for c in level_cols],
-            "peak_occupied": peak_row.values,
-            "capacity": cap_row.values,
-        })
-        peak_df["peak_occupancy_%"] = (100 * peak_df["peak_occupied"] / peak_df["capacity"]).round(1)
-        st.dataframe(peak_df.set_index("level"), use_container_width=True)
+with row1_right:
+    st.subheader("2. Tier-wise Pallet Distribution")
+    st.bar_chart(tier_wise_distribution(df))  # stacked by default with multiple columns
 
-with right:
-    st.subheader("Rack occupancy over time")
+row2_left, row2_right = st.columns(2)
+
+with row2_left:
+    st.subheader("3. Rack Utilization by Tier (%)")
+    st.bar_chart(rack_utilization_by_tier_pct(occ_history))
+
+with row2_right:
+    st.subheader("5. Avg Handling Time by Weight Category")
+    st.bar_chart(avg_handling_time_by_category(df))
+
+st.subheader("4. Pallet Throughput Over Time")
+freq_choice = st.radio("Bucket by", ["Hour", "Day"], horizontal=True)
+throughput = throughput_over_time(df, freq="h" if freq_choice == "Hour" else "D")
+if len(throughput):
+    st.line_chart(throughput)
+else:
+    st.info("No retrieval data yet.")
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# Occupancy over time (operational view)
+# ---------------------------------------------------------------------------
+st.subheader("Rack occupancy & staging queue over time")
+level_cols = [c for c in occ_history.columns if c.endswith("_occupied")]
+occ_left, occ_right = st.columns(2)
+with occ_left:
     if level_cols and len(occ_history) > 1:
         st.line_chart(occ_history.set_index("time")[level_cols])
-    else:
-        st.info("Not enough data points to chart.")
-
-    st.subheader("Staging queue length over time")
+with occ_right:
     if len(occ_history) > 1:
         st.line_chart(occ_history.set_index("time")["staging_count"])
 
 st.divider()
 
 # ---------------------------------------------------------------------------
-# At-risk pallets (currently in staging or HBR, deadline approaching)
+# Pallet detail table
 # ---------------------------------------------------------------------------
 st.subheader("Pallet detail")
-tier_filter = st.multiselect("Filter by tier", options=sorted(df["tier"].unique()), default=list(df["tier"].unique()))
-show_missed_only = st.checkbox("Show missed-deadline pallets only")
+cat_filter = st.multiselect("Filter by weight category", options=["Heavy", "Medium", "Light"],
+                             default=["Heavy", "Medium", "Light"])
+show_flagged = st.checkbox("Show only misplaced / late pallets")
 
-filtered = df[df["tier"].isin(tier_filter)]
-if show_missed_only:
-    filtered = filtered[filtered["missed_deadline"] == True]  # noqa: E712
+filtered = df[df["weight_category"].isin(cat_filter)]
+if show_flagged:
+    filtered = filtered[(filtered["missed_deadline"] == True) | (filtered["correctly_sorted"] == False)]  # noqa: E712
 
 st.dataframe(
-    filtered[["pallet_id", "tier", "weight", "handle_with_care", "arrival_time",
-              "hbr_slot", "staging_wait_min", "required_out_time", "retrieved_time",
-              "missed_deadline"]],
+    filtered[["pallet_id", "weight_category", "weight", "handle_with_care", "rack_tier",
+              "staging_wait_min", "handling_time_sec", "correctly_sorted",
+              "required_out_time", "retrieved_time", "missed_deadline"]],
     use_container_width=True,
     height=400,
 )
 
 st.caption(
-    "Slotting rule: Heavy -> Low, Medium -> Low/Mid, Light -> Mid/High. "
-    "Handle-with-care pallets are restricted to Low/Mid. "
-    "Retrieval priority is earliest required_out_time first (single-deep rack, no lane-blocking)."
+    "Tier rule: Heavy -> Tier 1 only, Medium -> Tier 1/2, Light -> Tier 2/3. "
+    "Handle-with-care restricted to Tier 1/2. A small % of placements are "
+    "deliberately simulated as sorting errors (see sidebar) to model real "
+    "operational imperfection. Retrieval priority = earliest required_out_time."
 )

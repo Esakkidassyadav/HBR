@@ -3,25 +3,26 @@
 Warehouse High-Bay Racking (HBR) pallet allocation and retrieval scheduling
 system. Solves two coupled problems:
 
-1. **Slotting** — assign each incoming pallet to a rack level based on weight
-   (Heavy -> Low, Medium -> Low/Mid, Light -> Mid/High), with
-   handle-with-care pallets restricted to Low/Mid.
+1. **Slotting** — assign each incoming pallet to a rack **Tier** based on
+   weight category (Heavy -> Tier 1 only, Medium -> Tier 1/2, Light -> Tier
+   2/3), with handle-with-care pallets restricted to Tier 1/2. A small
+   percentage of placements are deliberately simulated as sorting errors
+   (configurable), since real operations aren't 100% rule-compliant.
 2. **Retrieval scheduling** — pallets are pulled from the HBR in order of
-   `required_out_time` (earliest-deadline-first), which is derived from the
+   `required_out_time` (earliest-deadline-first), derived from the
    production line's material requirement, not arrival order.
 
 Rack is modeled as **single-deep**: every slot is independently accessible,
-so retrieval is never blocked by other pallets (no lane-sequencing
-constraint).
+so retrieval is never blocked by other pallets.
 
 ## Project structure
 
 ```
-models.py           Pallet, RackSlot dataclasses; weight-tier rules
-data_generator.py    Synthetic pallet arrival stream generator
-slotting.py          Slot-finding logic + retrieval priority queue
-simulation.py         SimPy-style discrete-event simulation (staging -> HBR -> retrieval)
-analysis.py          KPI computation (staging wait, missed deadlines, utilization)
+models.py           Pallet, RackSlot dataclasses; weight-category -> tier rules
+data_generator.py    Synthetic pallet stream: weight outliers, bursty arrivals, urgent deadlines
+slotting.py          Slot decision (incl. simulated misplacement), handling-time model, retrieval queue
+simulation.py         Discrete-event simulation (staging -> HBR -> retrieval), occupancy time series
+analysis.py          KPI computation: 5 top-line numbers + 5 chart-ready aggregations
 app.py               Streamlit dashboard
 ```
 
@@ -37,14 +38,16 @@ pip install simpy streamlit pandas faker
 from data_generator import generate_pallets
 from models import build_rack
 from simulation import run_simulation
-from analysis import pallets_to_dataframe, summary_kpis
+from analysis import pallets_to_dataframe, top_kpis
+import pandas as pd
 
-pallets = generate_pallets(n_pallets=200)
-rack = build_rack({"Low": 30, "Mid": 30, "High": 30})
-log, pallets, rack = run_simulation(pallets, rack)
+pallets = generate_pallets(n_pallets=300)
+rack = build_rack({"Tier 1": 25, "Tier 2": 25, "Tier 3": 25})
+log, pallets, rack, occupancy_history = run_simulation(pallets, rack, misplacement_probability=0.032)
 
 df = pallets_to_dataframe(pallets)
-print(summary_kpis(df))
+occ_df = pd.DataFrame(occupancy_history)
+print(top_kpis(df, occ_df))
 ```
 
 ## Run the dashboard
@@ -53,36 +56,52 @@ print(summary_kpis(df))
 streamlit run app.py
 ```
 
-Adjust pallet volume, rack capacity per level, arrival rate, and deadline
-window from the sidebar and re-run to see how staging wait time and
-on-time retrieval rate respond.
+## KPIs implemented
+
+**Top cards:** Total Pallets Processed, Sorting Accuracy, HBR Utilization,
+Average Handling Time, Misplacement Rate.
+
+**Charts:**
+1. Pallets by Weight Category (bar)
+2. Tier-wise Pallet Distribution (stacked bar, Tier x weight category)
+3. Rack Utilization by Tier (%) (bar)
+4. Pallet Throughput Over Time (line, hourly or daily)
+5. Average Handling Time by Weight Category (bar)
+
+Plus operational views: rack occupancy over time, staging queue length over
+time, and a filterable pallet detail table.
+
+## What makes the data realistic, not uniform
+
+- **Weight**: ~6% of pallets are outliers (oversized >1200kg or
+  near-empty <15kg), rest split across Heavy/Medium/Light bands.
+- **Arrivals**: bursty — occasional back-to-back clusters and occasional
+  20-45 min gaps (upstream line stoppages), not evenly spaced.
+- **Deadlines**: ~5% of pallets are "urgent" (5-15 min lead time) instead
+  of the normal 30-180 min window.
+- **Sorting errors**: a configurable % of placements (default 3.2%) ignore
+  the weight rule entirely, simulating operator/system error — this feeds
+  Sorting Accuracy / Misplacement Rate.
+- **Handling time**: scales with weight, plus random noise, plus a ~6%
+  chance of an outlier delay (jam, re-attempt), plus a penalty for
+  handle-with-care and for misplaced pallets (double-handling).
 
 ## Key design decisions
 
-- **required_out_time** = arrival_time + line lead time. This models the
-  fact that retrieval deadlines are driven by the production line's
-  material requirement, not by an arbitrary FIFO rule.
-- **Single-deep racking** assumed — simplifies slotting to a lookup and
-  removes lane-blocking from the retrieval model. If your actual HBR is
-  drive-in/lane-based, `slotting.py` and `simulation.py` would need a
-  lane-occupancy model instead of independent slots.
-- **Weight tiers** (Heavy/Medium/Light) and their allowed levels are
-  configurable in `models.py` — adjust thresholds to match your actual
-  pallet weight distribution and rack safety ratings.
-
-## Validated behavior
-
-- With generous rack capacity, 0% missed deadlines and 0 staging wait
-  (sanity check — no congestion, no delay).
-- With constrained capacity, staging wait rises and the Heavy tier (which
-  can only use the Low level) becomes the bottleneck first — matches
-  expected physical behavior.
+- **required_out_time** = arrival_time + line lead time — retrieval
+  deadlines are driven by the production line's material requirement.
+- **Single-deep racking** — simplifies slotting to a lookup, no
+  lane-blocking. If your real HBR is drive-in/lane-based, this needs a
+  lane-occupancy model instead.
+- All noise/error parameters (misplacement rate, outlier frequency, burst
+  probability) are adjustable in `data_generator.py` / `slotting.py`, and
+  misplacement rate is also a live slider in the dashboard.
 
 ## Next steps / extensions
 
 - Replace the greedy "first open slot" placement rule with an optimization
-  model (PuLP/OR-Tools) if you want provably optimal slot-fit.
+  model (PuLP/OR-Tools) for provably optimal slot-fit.
 - Add a lane-based (drive-in) rack model if your actual HBR isn't
   single-deep.
-- Validate `weight_tier` thresholds and lead-time distributions against
-  real Ather pallet/line data.
+- Validate weight/lead-time distributions and error rates against real
+  Ather pallet/line data.

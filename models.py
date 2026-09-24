@@ -1,36 +1,36 @@
 """
 Core data models for the HBR (High-Bay Racking) pallet sorting system.
+
+Two separate classification axes, kept distinct on purpose:
+  - weight_category: Heavy / Medium / Light        (a property of the pallet)
+  - rack_tier:        Tier 1 / Tier 2 / Tier 3       (a property of the rack slot)
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
 
-# ---------------------------------------------------------------------------
-# Weight tiers -> allowed rack levels
-# Heavy pallets go low (structural safety / ease of forklift handling),
-# light pallets go high. Handle-with-care pallets are restricted to
-# easily-accessible (Low/Mid) levels regardless of weight tier.
-# ---------------------------------------------------------------------------
-WEIGHT_TIERS = {
+WEIGHT_CATEGORIES = {
     "Heavy": (500, float("inf")),   # kg, lower bound inclusive
     "Medium": (150, 500),
     "Light": (0, 150),
 }
 
-TIER_TO_LEVELS = {
-    "Heavy": ["Low"],
-    "Medium": ["Low", "Mid"],
-    "Light": ["Mid", "High"],
+# Tier 1 = lowest/most structurally robust level (heaviest pallets)
+# Tier 3 = highest level (lightest pallets only)
+CATEGORY_TO_ALLOWED_TIERS = {
+    "Heavy": ["Tier 1"],
+    "Medium": ["Tier 1", "Tier 2"],
+    "Light": ["Tier 2", "Tier 3"],
 }
 
-HWC_ALLOWED_LEVELS = ["Low", "Mid"]  # handle-with-care never goes to High
+HWC_ALLOWED_TIERS = ["Tier 1", "Tier 2"]  # handle-with-care never goes to Tier 3
 
 
-def weight_tier(weight_kg: float) -> str:
-    for tier, (lo, hi) in WEIGHT_TIERS.items():
+def weight_category(weight_kg: float) -> str:
+    for cat, (lo, hi) in WEIGHT_CATEGORIES.items():
         if lo <= weight_kg < hi:
-            return tier
+            return cat
     return "Heavy"
 
 
@@ -45,13 +45,15 @@ class Pallet:
 
     staging_entry_time: Optional[datetime] = None
     staging_exit_time: Optional[datetime] = None
-    hbr_slot: Optional[str] = None
+    rack_slot: Optional[str] = None
     placed_time: Optional[datetime] = None
     retrieved_time: Optional[datetime] = None
+    handling_time_sec: Optional[float] = None
+    correctly_sorted: Optional[bool] = None   # False = simulated sorting error
 
     @property
-    def tier(self) -> str:
-        return weight_tier(self.weight)
+    def category(self) -> str:
+        return weight_category(self.weight)
 
     @property
     def staging_wait_seconds(self) -> Optional[float]:
@@ -75,7 +77,7 @@ class Pallet:
 @dataclass
 class RackSlot:
     slot_id: str
-    level: str                 # "Low" / "Mid" / "High"
+    tier: str                 # "Tier 1" / "Tier 2" / "Tier 3"
     occupied: bool = False
     pallet_id: Optional[str] = None
 
@@ -88,14 +90,15 @@ class RackSlot:
         self.pallet_id = None
 
 
-def build_rack(levels_config: dict) -> list:
+def build_rack(tier_config: dict) -> list:
     """
-    levels_config: e.g. {"Low": 20, "Mid": 20, "High": 20}
+    tier_config: e.g. {"Tier 1": 20, "Tier 2": 20, "Tier 3": 20}
     Returns a flat list of RackSlot (single-deep: every slot independently
     accessible, no lane-blocking).
     """
     slots = []
-    for level, count in levels_config.items():
+    for tier, count in tier_config.items():
+        prefix = tier.replace("Tier ", "T")
         for i in range(count):
-            slots.append(RackSlot(slot_id=f"{level[0]}{i+1:03d}", level=level))
+            slots.append(RackSlot(slot_id=f"{prefix}-{i+1:03d}", tier=tier))
     return slots
