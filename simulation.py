@@ -40,10 +40,13 @@ def run_simulation(pallets: list, rack_slots: list, tick_minutes: int = 1,
         while True:
             current_dt = to_dt(env.now)
 
-            # 1. Arrivals due -> enter staging
+            # 1. Arrivals due -> enter staging. The misplacement/error roll
+            # happens exactly once here, at arrival -- not on every retry
+            # while the pallet waits in staging (see slotting.decide_slot).
             while idx < len(arrivals_sorted) and arrivals_sorted[idx].arrival_time <= current_dt:
                 p = arrivals_sorted[idx]
                 p.staging_entry_time = current_dt
+                p.force_misplacement = rng.random() < misplacement_probability
                 staging.append(p)
                 log.append({"time": current_dt, "event": "ARRIVE", "pallet_id": p.pallet_id})
                 idx += 1
@@ -51,7 +54,7 @@ def run_simulation(pallets: list, rack_slots: list, tick_minutes: int = 1,
             # 2. Try to place staged pallets into open slots
             still_staged = []
             for p in staging:
-                slot, correct = decide_slot(p, rack_slots, rng, misplacement_probability)
+                slot, correct = decide_slot(p, rack_slots, p.force_misplacement)
                 if slot:
                     slot.place(p.pallet_id)
                     p.rack_slot = slot.slot_id

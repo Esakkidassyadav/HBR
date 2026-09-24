@@ -5,6 +5,7 @@ Run with: streamlit run app.py
 """
 import streamlit as st
 import pandas as pd
+import altair as alt
 
 from data_generator import generate_pallets
 from models import build_rack
@@ -15,6 +16,26 @@ from analysis import (
     throughput_over_time, avg_handling_time_by_category,
 )
 
+CATEGORY_ORDER = ["Heavy", "Medium", "Light"]
+CATEGORY_COLORS = {"Heavy": "#4c78a8", "Medium": "#72b7b2", "Light": "#9ecae9"}
+
+
+def ordered_bar(series: pd.Series, value_label: str):
+    """Bar chart that keeps CATEGORY_ORDER instead of Streamlit's default
+    alphabetical sort (which otherwise renders Heavy/Light/Medium)."""
+    chart_df = series.reindex(CATEGORY_ORDER).reset_index()
+    chart_df.columns = ["weight_category", value_label]
+    chart = alt.Chart(chart_df).mark_bar().encode(
+        x=alt.X("weight_category", sort=CATEGORY_ORDER, title=None),
+        y=alt.Y(value_label, title=None),
+        color=alt.Color("weight_category", sort=CATEGORY_ORDER,
+                         scale=alt.Scale(domain=CATEGORY_ORDER,
+                                          range=[CATEGORY_COLORS[c] for c in CATEGORY_ORDER]),
+                         legend=None),
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 st.set_page_config(page_title="HBR Pallet Sorting", layout="wide")
 st.title("Warehouse HBR Pallet Sorting")
 st.caption("Weight-based slotting + deadline-driven retrieval scheduling (single-deep racking)")
@@ -23,14 +44,14 @@ st.caption("Weight-based slotting + deadline-driven retrieval scheduling (single
 # Sidebar controls
 # ---------------------------------------------------------------------------
 st.sidebar.header("Simulation settings")
-n_pallets = st.sidebar.slider("Number of pallets", 20, 1500, 300, step=10)
+n_pallets = st.sidebar.slider("Number of pallets", 20, 1500, 500, step=10)
 st.sidebar.subheader("Rack capacity (slots per tier)")
-t1_cap = st.sidebar.slider("Tier 1 (heavy)", 1, 150, 25)
-t2_cap = st.sidebar.slider("Tier 2 (medium)", 1, 150, 25)
-t3_cap = st.sidebar.slider("Tier 3 (light)", 1, 150, 25)
+t1_cap = st.sidebar.slider("Tier 1 (heavy)", 1, 150, 8)
+t2_cap = st.sidebar.slider("Tier 2 (medium)", 1, 150, 8)
+t3_cap = st.sidebar.slider("Tier 3 (light)", 1, 150, 8)
 st.sidebar.subheader("Arrival & deadline pattern")
 arr_min, arr_max = st.sidebar.slider("Arrival interval (min)", 1, 20, (2, 8))
-lead_min, lead_max = st.sidebar.slider("Line lead time / deadline window (min)", 5, 300, (30, 180))
+lead_min, lead_max = st.sidebar.slider("Line lead time / deadline window (min)", 5, 300, (60, 240))
 hwc_pct = st.sidebar.slider("Handle-with-care %", 0, 50, 15)
 misplacement_pct = st.sidebar.slider("Sorting error rate %", 0.0, 15.0, 3.2, step=0.1)
 seed = st.sidebar.number_input("Random seed", value=42, step=1)
@@ -76,12 +97,21 @@ row1_left, row1_right = st.columns(2)
 
 with row1_left:
     st.subheader("1. Pallets by Weight Category")
-    weight_counts = pallets_by_weight_category(df)
-    st.bar_chart(weight_counts)
+    ordered_bar(pallets_by_weight_category(df), "count")
 
 with row1_right:
     st.subheader("2. Tier-wise Pallet Distribution")
-    st.bar_chart(tier_wise_distribution(df))  # stacked by default with multiple columns
+    tier_dist = tier_wise_distribution(df).reset_index().melt(
+        id_vars="rack_tier", var_name="weight_category", value_name="count")
+    stacked = alt.Chart(tier_dist).mark_bar().encode(
+        x=alt.X("rack_tier", title=None),
+        y=alt.Y("count", title=None),
+        color=alt.Color("weight_category", sort=CATEGORY_ORDER,
+                         scale=alt.Scale(domain=CATEGORY_ORDER,
+                                          range=[CATEGORY_COLORS[c] for c in CATEGORY_ORDER])),
+        order=alt.Order("weight_category", sort="ascending"),
+    )
+    st.altair_chart(stacked, use_container_width=True)
 
 row2_left, row2_right = st.columns(2)
 
@@ -91,7 +121,7 @@ with row2_left:
 
 with row2_right:
     st.subheader("5. Avg Handling Time by Weight Category")
-    st.bar_chart(avg_handling_time_by_category(df))
+    ordered_bar(avg_handling_time_by_category(df), "avg_handling_time_sec")
 
 st.subheader("4. Pallet Throughput Over Time")
 freq_choice = st.radio("Bucket by", ["Hour", "Day"], horizontal=True)
@@ -111,7 +141,9 @@ level_cols = [c for c in occ_history.columns if c.endswith("_occupied")]
 occ_left, occ_right = st.columns(2)
 with occ_left:
     if level_cols and len(occ_history) > 1:
-        st.line_chart(occ_history.set_index("time")[level_cols])
+        occ_plot = occ_history.set_index("time")[level_cols].rename(
+            columns=lambda c: c.replace("_occupied", ""))
+        st.line_chart(occ_plot)
 with occ_right:
     if len(occ_history) > 1:
         st.line_chart(occ_history.set_index("time")["staging_count"])

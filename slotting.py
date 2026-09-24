@@ -13,7 +13,9 @@ Sorting Accuracy / Misplacement Rate KPIs.
 import heapq
 import itertools
 import random
-from models import CATEGORY_TO_ALLOWED_TIERS, HWC_ALLOWED_TIERS
+from models import CATEGORY_TO_ALLOWED_TIERS, HWC_ALLOWED_TIERS, PRIMARY_TIER
+
+ALL_TIERS = ["Tier 1", "Tier 2", "Tier 3"]
 
 
 def allowed_tiers(pallet):
@@ -25,25 +27,38 @@ def allowed_tiers(pallet):
     return tiers
 
 
-def decide_slot(pallet, slots: list, rng: random.Random, misplacement_probability: float = 0.032):
+def decide_slot(pallet, slots: list, force_misplacement: bool):
     """
     Returns (slot_or_None, correctly_sorted_bool).
 
-    With probability `misplacement_probability`, ignores the weight rule
-    and places the pallet in any open slot (simulated sorting error).
-    Otherwise places it in an open slot matching its allowed tiers.
+    `force_misplacement` is decided ONCE per pallet (at arrival, not on
+    every staging retry) -- otherwise a pallet that waits N ticks in
+    staging gets N chances to trigger the error roll, silently inflating
+    the real misplacement rate far above the configured probability.
+
+    If force_misplacement is True, ignores the weight rule and places the
+    pallet in any open slot (simulated sorting error). Otherwise tries the
+    pallet's PRIMARY tier first (its natural home), overflowing into
+    another allowed tier only once the primary is full.
     """
     open_slots = [s for s in slots if not s.occupied]
     if not open_slots:
         return None, None
 
-    if rng.random() < misplacement_probability:
-        return rng.choice(open_slots), False
+    if force_misplacement:
+        return open_slots[0], False
 
-    candidates = [s for s in open_slots if s.tier in allowed_tiers(pallet)]
-    if not candidates:
-        return None, None
-    return candidates[0], True
+    tiers = allowed_tiers(pallet)
+    primary = PRIMARY_TIER.get(pallet.category)
+    search_order = [t for t in [primary] + ALL_TIERS if t in tiers]
+    seen = set()
+    search_order = [t for t in search_order if not (t in seen or seen.add(t))]
+
+    for tier in search_order:
+        candidates = [s for s in open_slots if s.tier == tier]
+        if candidates:
+            return candidates[0], True
+    return None, None
 
 
 def handling_time_seconds(pallet, correctly_sorted: bool, rng: random.Random) -> float:
