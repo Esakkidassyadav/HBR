@@ -24,6 +24,16 @@ CATEGORY_TO_ALLOWED_TIERS = {
     "Light": ["Tier 2", "Tier 3"],
 }
 
+# The tier each category should fill FIRST -- without this, a naive
+# first-open-slot search always favors Tier 1 then Tier 2, leaving Tier 3
+# almost empty. This gives every category a natural "home" tier, with the
+# others in CATEGORY_TO_ALLOWED_TIERS used only as overflow when full.
+PRIMARY_TIER = {
+    "Heavy": "Tier 1",
+    "Medium": "Tier 2",
+    "Light": "Tier 3",
+}
+
 HWC_ALLOWED_TIERS = ["Tier 1", "Tier 2"]  # handle-with-care never goes to Tier 3
 
 
