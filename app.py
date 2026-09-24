@@ -13,7 +13,7 @@ from simulation import run_simulation
 from analysis import (
     pallets_to_dataframe, top_kpis, pallets_by_weight_category,
     tier_wise_distribution, rack_utilization_by_tier_pct,
-    throughput_over_time, avg_handling_time_by_category,
+    throughput_over_time,
 )
 
 CATEGORY_ORDER = ["Heavy", "Medium", "Light"]
@@ -97,7 +97,16 @@ row1_left, row1_right = st.columns(2)
 
 with row1_left:
     st.subheader("1. Pallets by Weight Category")
-    ordered_bar(pallets_by_weight_category(df), "count")
+    donut_df = pallets_by_weight_category(df).reindex(CATEGORY_ORDER).reset_index()
+    donut_df.columns = ["weight_category", "count"]
+    donut = alt.Chart(donut_df).mark_arc(innerRadius=60).encode(
+        theta="count",
+        color=alt.Color("weight_category", sort=CATEGORY_ORDER,
+                         scale=alt.Scale(domain=CATEGORY_ORDER,
+                                          range=[CATEGORY_COLORS[c] for c in CATEGORY_ORDER])),
+        tooltip=["weight_category", "count"],
+    )
+    st.altair_chart(donut, use_container_width=True)
 
 with row1_right:
     st.subheader("2. Tier-wise Pallet Distribution")
@@ -117,11 +126,39 @@ row2_left, row2_right = st.columns(2)
 
 with row2_left:
     st.subheader("3. Rack Utilization by Tier (%)")
-    st.bar_chart(rack_utilization_by_tier_pct(occ_history))
+    util = rack_utilization_by_tier_pct(occ_history).reset_index()
+    util.columns = ["tier", "utilization_pct"]
+
+    def threshold_color(pct):
+        if pct >= 85:
+            return "#e15759"   # red -- near capacity, risk of staging overflow
+        if pct >= 70:
+            return "#f2b134"   # amber -- busy
+        return "#59a14f"        # green -- healthy headroom
+    util["color"] = util["utilization_pct"].apply(threshold_color)
+
+    util_chart = alt.Chart(util).mark_bar().encode(
+        y=alt.Y("tier", sort=None, title=None),
+        x=alt.X("utilization_pct", title="% utilized", scale=alt.Scale(domain=[0, 100])),
+        color=alt.Color("color", scale=None, legend=None),
+        tooltip=["tier", "utilization_pct"],
+    )
+    st.altair_chart(util_chart, use_container_width=True)
+    st.caption("🟢 <70%   🟠 70-85%   🔴 85%+ (capacity risk)")
 
 with row2_right:
-    st.subheader("5. Avg Handling Time by Weight Category")
-    ordered_bar(avg_handling_time_by_category(df), "avg_handling_time_sec")
+    st.subheader("5. Handling Time by Weight Category")
+    box_df = df[["weight_category", "handling_time_sec"]].dropna()
+    box = alt.Chart(box_df).mark_boxplot(extent="min-max").encode(
+        x=alt.X("weight_category", sort=CATEGORY_ORDER, title=None),
+        y=alt.Y("handling_time_sec", title="seconds"),
+        color=alt.Color("weight_category", sort=CATEGORY_ORDER,
+                         scale=alt.Scale(domain=CATEGORY_ORDER,
+                                          range=[CATEGORY_COLORS[c] for c in CATEGORY_ORDER]),
+                         legend=None),
+    )
+    st.altair_chart(box, use_container_width=True)
+    st.caption("Box = middle 50% of pallets, whiskers = full range including outliers (jams/re-attempts)")
 
 st.subheader("4. Pallet Throughput Over Time")
 freq_choice = st.radio("Bucket by", ["Hour", "Day"], horizontal=True)
@@ -138,13 +175,27 @@ st.divider()
 # ---------------------------------------------------------------------------
 st.subheader("Rack occupancy & staging queue over time")
 level_cols = [c for c in occ_history.columns if c.endswith("_occupied")]
+TIER_COLORS = {"Tier 1": "#e15759", "Tier 2": "#4c78a8", "Tier 3": "#59a14f"}  # distinct hues, not just shades of blue
+
 occ_left, occ_right = st.columns(2)
 with occ_left:
+    st.caption("% of each tier's capacity in use -- comparable scale regardless of slot count")
     if level_cols and len(occ_history) > 1:
-        occ_plot = occ_history.set_index("time")[level_cols].rename(
-            columns=lambda c: c.replace("_occupied", ""))
-        st.line_chart(occ_plot)
+        pct_df = occ_history[["time"]].copy()
+        for col in level_cols:
+            tier = col.replace("_occupied", "")
+            cap_col = f"{tier}_capacity"
+            pct_df[tier] = (100 * occ_history[col] / occ_history[cap_col]).round(1)
+        pct_long = pct_df.melt(id_vars="time", var_name="tier", value_name="utilization_pct")
+        occ_chart = alt.Chart(pct_long).mark_line().encode(
+            x=alt.X("time", title=None),
+            y=alt.Y("utilization_pct", title="% utilized", scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color("tier", scale=alt.Scale(domain=list(TIER_COLORS.keys()),
+                                                      range=list(TIER_COLORS.values()))),
+        )
+        st.altair_chart(occ_chart, use_container_width=True)
 with occ_right:
+    st.caption("Pallets waiting in staging (no open slot yet)")
     if len(occ_history) > 1:
         st.line_chart(occ_history.set_index("time")["staging_count"])
 
